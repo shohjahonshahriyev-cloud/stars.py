@@ -1,0 +1,17 @@
+[build]
+builder = "nixpacks"
+
+[deploy]
+startCommand = "python stars_referal_bot.py"
+restartPolicyType = "on_failure"
+restartPolicyMaxRetries = 10
+
+[env]
+BOT_TOKEN = ""
+ADMIN_ID = "422057508"
+ADMIN_USERNAME = "shohjahon_o5"
+DATABASE_URL = "sqlite+aiosqlite:///stars_bot.db"
+REFERRAL_REWARD = "5"
+MINIMUM_WITHDRAWAL = "50"
+SPONSOR_CHANNELS = "@shohjahon_shahriyev"
+IS_RAILWAY = "true"
