@@ -6,6 +6,8 @@ Telegram Stars Referal Bot - Simple Working Version
 import asyncio
 import logging
 import sys
+import os
+import re
 from datetime import datetime
 from typing import List
 
@@ -18,16 +20,43 @@ from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 from sqlalchemy import String, Integer, Boolean, DateTime, BigInteger, Text, select, update, func
 from pydantic_settings import BaseSettings
 
+# ==================== LOGGING ====================
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+    handlers=[
+        logging.FileHandler('bot.log'),
+        logging.StreamHandler()
+    ]
+)
+logger = logging.getLogger(__name__)
+
+# Log yozish funksiyasi
+def log_info(message: str):
+    """Log yozish uchun qulay funktsiya"""
+    logger.info(message)
+    print(f"INFO: {message}")
+
+def log_error(message: str):
+    """Xatolik log yozish uchun qulay funktsiya"""
+    logger.error(message)
+    print(f"ERROR: {message}")
+
+def log_debug(message: str):
+    """Debug log yozish uchun qulay funktsiya"""
+    logger.debug(message)
+    print(f"DEBUG: {message}")
+
 # ==================== CONFIG ====================
 class Config(BaseSettings):
-    bot_token: str = "8512569193:AAFF-vMCt4GSbldCSZd5JoJhJYE6M0F7_Mc"
-    admin_id: int = 422057508
+    bot_token: str = "8592783954:AAF5-jJLxbS0WvPzbU_IK-UgeowfljwN8lo"
+    admin_id: int = 422057508   # Test uchun o'zgartirildi
     admin_username: str = "shohjahon_o5"
-    database_url: str = "sqlite+aiosqlite:///stars_bot.db"
+    database_url: str = os.getenv("DATABASE_URL", "sqlite+aiosqlite:///stars_bot.db").replace("postgresql://", "postgresql+asyncpg://")
     referral_reward: int = 3  # 3 stars
-    minimum_withdrawal: int = 50  # 50 stars
+    minimum_withdrawal: int = 30  # 30 stars
     sponsor_channels: str = "@shohjahon_shahriyev"  # Default kanal
-    is_railway: bool = False
+    is_railway: bool = os.getenv("RAILWAY_ENVIRONMENT", "").startswith("production") or os.getenv("IS_RAILWAY", "false").lower() == "true"
 
     @property
     def sponsor_channels_list(self) -> List[str]:
@@ -60,7 +89,7 @@ class Withdrawal(Base):
     id: Mapped[int] = mapped_column(primary_key=True)
     user_id: Mapped[int] = mapped_column(BigInteger)
     amount: Mapped[int] = mapped_column(Integer)  # Stars
-    card_number: Mapped[str] = mapped_column(String(20))
+    user_info: Mapped[str] = mapped_column(Text)  # Foydalanuvchi ma'lumotlari
     status: Mapped[str] = mapped_column(String(20), default="pending")
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
 
@@ -185,6 +214,10 @@ async def check_subscription_callback(callback: CallbackQuery):
         except Exception:
             unsubscribed_channels.append(channel)
     
+    # Agar foydalanuvchi kanallardan chiqib ketsa, referral jarimasini qo'llash
+    if unsubscribed_channels and len(subscribed_channels) < len(channels):
+        await process_referral_penalty(callback.from_user.id, callback.bot)
+    
     channel_buttons = []
     
     for channel in unsubscribed_channels:
@@ -223,6 +256,10 @@ async def check_subscription_callback(callback: CallbackQuery):
     
     if not unsubscribed_channels:
         await callback.message.delete()
+        
+        # Obuna bo'lgandan so'ng referral mukofotlarini berish
+        await process_pending_referral_rewards(callback.from_user.id, callback.bot)
+        
         await callback.bot.send_message(
             callback.from_user.id,
             text,
@@ -319,56 +356,173 @@ async def handle_referral_reward(session, referrer_id: int, referred_id: int, bo
     if not referrer or not referred_user:
         return
 
-    # Referal yozuvini yaratish
+    # Referal yozuvini yaratish (mukofot hali berilmagan)
     referral = Referral(
         referrer_id=referrer_id,
         referred_id=referred_id,
-        reward_given=True
+        reward_given=False  # Dastlab mukofot berilmaydi
     )
     session.add(referral)
-    
-    # Darhol mukofot berish
-    referrer.balance += settings.referral_reward
-    referrer.referral_count += 1
-    
     await session.commit()
     
-    # Referal egasiga bildirish xabari
+    # Referal egasiga bildirish xabari (mukofotsiz)
     try:
         await bot.send_message(
             referrer_id,
-            f"🎉 TABRIKLAYMAN! Yangi referal keldi!\n\n"
+            f"🎉 YANGI REFERAL KELDI!\n\n"
             f"👤 Ismi: {referred_user.first_name}\n"
             f"🆔 ID: {referred_user.telegram_id}\n"
             (f"@{referred_user.username}\n" if referred_user.username else "") + "\n\n"
-            f"⭐ Sizga {settings.referral_reward} ⭐ berildi!\n"
-            f"📊 Sizning yangi balansingiz: {format_balance(referrer.balance)} ⭐\n"
-            f"👥 Jami referallar: {referrer.referral_count} ta\n\n"
-            f"🔥 Davom eting!"
+            f"⚠️ Mukofot obuna tasdiqlangandan keyin beriladi!\n"
+            f"📊 Jami referallar: {referrer.referral_count} ta\n\n"
+            f"� Ushbu foydalanuvchi homiy kanallariga obuna bo'lsa,\n"
+            f"sizga {settings.referral_reward} ⭐ beriladi!"
         )
-    except TelegramAPIError:
-        pass
-    
+    except Exception as e:
+        print(f"Error sending referral notification: {e}")
+
     # Yangi foydalanuvchiga ham xabar berish
     try:
         await bot.send_message(
             referred_id,
             f"🎉 Siz muvaffaqiyatli referal bo'ldingiz!\n\n"
-            f"⭐ Siz @{referrer.username if referrer.username else 'admin'} taklifiga qo'shildingiz\n"
-            f"🎁 U {settings.referral_reward} ⭐ oldi!\n\n"
+            f"👤 Sizni @{referrer.username if referrer.username else 'admin'} taklif qildi\n"
+            f"🎁 U {settings.referral_reward} ⭐ olishi uchun siz obuna bo'lishingiz kerak!\n\n"
+            f"📺 Homiy kanallariga obuna bo'ling va mukofot oling!\n"
             f"🚀 Endi siz ham do'stlaringizni taklif qiling!"
         )
     except TelegramAPIError:
         pass
 
-@dp.message(F.text == "⭐ Balans")
-async def cmd_balance(message: Message):
-    if not await check_subscription(message.from_user.id, message.bot):
-        await message.answer(
-            "🔒 Botdan to'liq foydalanish uchun homiy kanallarimizga obuna bo'ling!\n\n"
-            "📺 Obuna bo'lgandan so'ng barcha funktsiyalar mavjud bo'ladi.",
-            reply_markup=restricted_menu()
+async def process_pending_referral_rewards(user_id: int, bot: Bot):
+    """Foydalanuvchi obuna bo'lganda, kutayotgan referral mukofotlarini berish"""
+    async with async_session_maker() as session:
+        # Foydalanuvchining referral larini topish
+        result = await session.execute(
+            select(Referral).where(
+                Referral.referred_id == user_id,
+                Referral.reward_given == False
+            )
         )
+        pending_referrals = result.scalars().all()
+        
+        if not pending_referrals:
+            return
+        
+        for referral in pending_referrals:
+            # Referal egasini topish
+            referrer_result = await session.execute(
+                select(User).where(User.telegram_id == referral.referrer_id)
+            )
+            referrer = referrer_result.scalar_one_or_none()
+            
+            if referrer:
+                # Mukofot berish
+                referrer.balance += settings.referral_reward
+                referrer.referral_count += 1
+                
+                # Referral ni yangilash
+                referral.reward_given = True
+                
+                await session.commit()
+                
+                # Referal egasiga xabar yuborish
+                try:
+                    await bot.send_message(
+                        referrer.telegram_id,
+                        f"🎉 MUKOFOT BERILDI!\n\n"
+                        f"👤 {user_id} ID li foydalanuvchi homiy kanallariga obuna bo'ldi!\n"
+                        f"⭐ Sizga {settings.referral_reward} ⭐ berildi!\n"
+                        f"📊 Yangi balans: {referrer.balance} ⭐\n"
+                        f"👥 Jami referallar: {referrer.referral_count} ta"
+                    )
+                except Exception as e:
+                    print(f"Error sending reward notification: {e}")
+                
+                # Foydalanuvchiga ham xabar yuborish
+                try:
+                    await bot.send_message(
+                        user_id,
+                        f"🎉 TABRIKLAYMIZ!\n\n"
+                        f"✅ Siz homiy kanallariga muvaffaqiyatli obuna bo'ldingiz!\n"
+                        f"🎁 Sizni chaqirgan @{referrer.username if referrer.username else 'admin'}\n"
+                        f"⭐ U {settings.referral_reward} ⭐ oldi!\n\n"
+                        f"🚀 Endi siz ham do'stlaringizni taklif qiling!"
+                    )
+                except Exception as e:
+                    print(f"Error sending user notification: {e}")
+
+async def process_referral_penalty(user_id: int, bot: Bot):
+    """Foydalanuvchi kanallardan chiqib ketsa, referral jarimasini qo'llash"""
+    async with async_session_maker() as session:
+        # Foydalanuvchining kim tomondan referral ekanligini topish
+        result = await session.execute(select(User).where(User.telegram_id == user_id))
+        user = result.scalar_one_or_none()
+        
+        if not user or not user.referred_by:
+            return
+        
+        # Referral egasini topish
+        referrer_result = await session.execute(
+            select(User).where(User.telegram_id == user.referred_by)
+        )
+        referrer = referrer_result.scalar_one_or_none()
+        
+        if not referrer:
+            return
+        
+        # Referral jarimasini tekshirish (faqat bir marta)
+        penalty_result = await session.execute(
+            select(Referral).where(
+                Referral.referrer_id == user.referred_by,
+                Referral.referred_id == user_id,
+                Referral.reward_given == True
+            )
+        )
+        existing_referral = penalty_result.scalar_one_or_none()
+        
+        if existing_referral and referrer.balance >= settings.referral_reward:
+            # Jarimani qo'llash
+            referrer.balance -= settings.referral_reward
+            referrer.referral_count = max(0, referrer.referral_count - 1)
+            
+            # Referral ni yangilash
+            existing_referral.reward_given = False  # Jarima belgisi
+            
+            await session.commit()
+            
+            # Referral egasiga xabar
+            try:
+                await bot.send_message(
+                    referrer.telegram_id,
+                    f"⚠️ REFERAL JARIMASI!\n\n"
+                    f"👤 {user.first_name} ({user.telegram_id})\n"
+                    f"📺 Homiy kanallaridan chiqib ketdi!\n"
+                    f"💸 {settings.referral_reward} ⭐ jarimlandi!\n"
+                    f"📊 Yangi balans: {referrer.balance} ⭐\n"
+                    f"👥 Jami referallar: {referrer.referral_count} ta\n\n"
+                    f"🔄 U qayta obuna bo'lsa, mukofot qaytariladi!"
+                )
+                print(f"DEBUG: Penalty notification sent to referrer: {referrer.telegram_id}")
+            except Exception as e:
+                print(f"Error sending penalty notification: {e}")
+            
+            # Foydalanuvchiga xabar
+            try:
+                await bot.send_message(
+                    user_id,
+                    f"⚠️ DIQQAT!\n\n"
+                    f"📺 Siz homiy kanallaridan chiqib ketdingiz!\n"
+                    f"👤 Sizni chaqirgan: @{referrer.username if referrer.username else 'admin'}\n"
+                    f"💸 Uning hisobidan {settings.referral_reward} ⭐ jarimlandi!\n"
+                    f"📊 Yangi balans: {referrer.balance} ⭐\n"
+                    f"� Jami referallar: {referrer.referral_count} ta\n\n"
+                    f"� Qayta obuna bo'lsangiz, mukofot qaytariladi!\n"
+                    f"📱 Obuna bo'lish uchun pastdagi tugmalardan foydalaning!"
+                )
+                print(f"DEBUG: Penalty notification sent to user: {user.telegram_id}")
+            except Exception as e:
+                print(f"Error sending user penalty notification: {e}")
         return
         
     async with async_session_maker() as session:
@@ -423,8 +577,6 @@ async def cmd_referrals(message: Message):
                 text += f"\n   Sana: {referral.created_at.strftime('%d.%m.%Y')}"
                 text += f"\n   {status}\n\n"
         
-        text += f"⭐ Jami daromad: {format_balance(len(referrals) * settings.referral_reward)} ⭐"
-        
         await message.answer(text)
 
 @dp.message(F.text == "🔗 Referal havola")
@@ -436,9 +588,20 @@ async def cmd_referral_link(message: Message):
             reply_markup=restricted_menu()
         )
         return
-        
+    
     bot_username = (await message.bot.get_me()).username
     referral_link = generate_referral_link(message.from_user.id, bot_username)
+    
+    # Foydalanuvchi admin bilan muloqotligini tekshirish
+    if message.from_user.id == settings.admin_id:
+        await message.answer(
+            f"🔗 Sizning referal havolangiz:\n\n"
+            f"`{referral_link}`\n\n"
+            f"🎁 Siz adminsiz, shuning uchun referal havolangiz ishlamaydi!\n"
+            f"📊 Jami referallar: {len(referrals)} ta\n"
+            f"⭐ Jami daromad: {format_balance(len(referrals) * settings.referral_reward)} ⭐"
+        )
+        return
     
     await message.answer(
         f"🔗 Sizning referal havolangiz:\n\n"
@@ -446,6 +609,58 @@ async def cmd_referral_link(message: Message):
         f"🎁 Har bir referal uchun {format_balance(settings.referral_reward)} ⭐ bonus!",
         parse_mode="Markdown"
     )
+
+@dp.message(F.text == "⭐ Balans")
+async def cmd_balance(message: Message):
+    if not await check_subscription(message.from_user.id, message.bot):
+        await message.answer(
+            "🔒 Botdan to'liq foydalanish uchun homiy kanallarimizga obuna bo'ling!\n\n"
+            "📺 Obuna bo'lgandan so'ng barcha funktsiyalar mavjud bo'ladi.",
+            reply_markup=restricted_menu()
+        )
+        return
+    
+    # Foydalanuvchi admin bilan muloqotligini tekshirish
+    if message.from_user.id == settings.admin_id:
+        await message.answer(
+            "🎁 Admin paneliga xush kelibsiz!\n\n"
+            "📊 Balansni o'zgartirish uchun /balans komandasidan foydalaning."
+        )
+        return
+    
+    async with async_session_maker() as session:
+        result = await session.execute(select(User).where(User.telegram_id == message.from_user.id))
+        user = result.scalar_one_or_none()
+        
+        if not user:
+            await message.answer("❌ Sizning ma'lumotlaringiz topilmadi!")
+            return
+        
+        await message.answer(
+            f"⭐ Sizning balansingiz: {format_balance(user.balance)} ⭐\n"
+            f"🎁 Referallar soni: {user.referral_count} ta\n"
+            f"💰 Minimal yechib olish: {format_balance(settings.minimum_withdrawal)} ⭐\n"
+            f"🔗 Sizning referal havolangiz: {generate_referral_link(message.from_user.id, (await message.bot.get_me()).username)}\n\n"
+            f"⭐ Stars yechib olish uchun pastdagi tugmani bosing!"
+        )
+        
+        # Stars yechib olish tugmasini qo'shish
+        if user.balance >= settings.minimum_withdrawal:
+            await message.answer(
+                "⭐ Stars yechib olish uchun ariza qoldiring!\n\n"
+                "📝 Quyidagi formatda yuboring:\n\n"
+                "💰 Miqdor: (masalan: 30)\n"
+                "👤 Foydalanuvchi nomi: @username\n"
+                "🆔 Telegram ID: 123456789\n\n"
+                f"⚠️ Diqqat: Maksimal miqdor - {format_balance(user.balance)} ⭐"
+            )
+        else:
+            await message.answer(
+                f"❌ Balansingiz yetarli emas!\n\n"
+                f"💰 Sizning balansingiz: {format_balance(user.balance)} ⭐\n"
+                f"⭐ Minimal yechib olish: {format_balance(settings.minimum_withdrawal)} ⭐\n\n"
+                f"🔗 Yana referallar taklif qiling!"
+            )
 
 @dp.message(F.text == "⭐ Stars yechib olish")
 async def cmd_withdraw(message: Message):
@@ -456,16 +671,40 @@ async def cmd_withdraw(message: Message):
             reply_markup=restricted_menu()
         )
         return
+    
+    async with async_session_maker() as session:
+        result = await session.execute(select(User).where(User.telegram_id == message.from_user.id))
+        user = result.scalar_one_or_none()
         
-    await message.answer(
-        "⭐ Stars yechib olish:\n\n"
-        "📞 Admin bilan bog'laning:\n"
-        f"@{settings.admin_username}\n\n"
-        f"⭐ Minimal yechib olish: {format_balance(settings.minimum_withdrawal)} ⭐"
-    )
+        if not user:
+            await message.answer("❌ Sizning ma'lumotlaringiz topilmadi!")
+            return
+        
+        if user.balance < settings.minimum_withdrawal:
+            await message.answer(
+                f"❌ Balansingiz yetarli emas!\n\n"
+                f"💰 Sizning balansingiz: {format_balance(user.balance)} ⭐\n"
+                f"⭐ Minimal yechib olish: {format_balance(settings.minimum_withdrawal)} ⭐\n\n"
+                f"🔗 Yana referallar taklif qiling!"
+            )
+            return
+        
+        await message.answer(
+            "⭐ Stars yechib olish uchun ariza qoldiring:\n\n"
+            "📝 Quyidagi formatda yuboring:\n\n"
+            f"💰 Miqdor: (masalan: {format_balance(user.balance)})\n"
+            "👤 Foydalanuvchi nomi: @username\n"
+            "🆔 Telegram ID: 123456789\n\n"
+            f"⚠️ Diqqat: Maksimal miqdor - {format_balance(user.balance)} ⭐"
+        )
+        
+        # Foydalanuvchini ariza qoldirish rejimiga o'tkazamiz
+        # Bu yerda state ishlatish kerak, lekin hozircha oddiy usul
 
 @dp.message(F.text == "📞 Admin bilan aloqa")
 async def cmd_contact_admin(message: Message):
+    print(f"DEBUG: Admin contact button pressed by user {message.from_user.id}")
+    
     if not await check_subscription(message.from_user.id, message.bot):
         await message.answer(
             "🔒 Botdan to'liq foydalanish uchun homiy kanallarimizga obuna bo'ling!\n\n"
@@ -473,14 +712,309 @@ async def cmd_contact_admin(message: Message):
             reply_markup=restricted_menu()
         )
         return
-        
+    
+    # Admin bilan muloqot xabari
     await message.answer(
         "📞 Admin bilan bog'lanish:\n\n"
-        f"@{settings.admin_username}\n\n"
-        "📝 Savollaringiz bo'lsa yozing!"
+        f"👤 Admin: @{settings.admin_username}\n"
+        f"🆔 Admin ID: {settings.admin_id}\n\n"
+        "📝 Savollaringiz bo'lsa yozing!\n\n"
+        "⏰ Admin tez orada javob beradi"
     )
+    
+    # Adminga xabar yuborish
+    try:
+        await message.bot.send_message(
+            settings.admin_id,
+            f"📞 FOYDALANUVCHI MULOQOT SO'RADI!\n\n"
+            f"👤 Ism: {message.from_user.first_name}\n"
+            f"🆔 ID: {message.from_user.id}\n"
+            f"👤 Username: @{message.from_user.username or 'none'}\n\n"
+            f"📞 Admin bilan bog'lanish tugmasini bosdi!"
+        )
+        print(f"DEBUG: Admin notification sent for user {message.from_user.id}")
+    except Exception as e:
+        print(f"ERROR: Failed to send admin notification: {e}")
+
+@dp.message(F.from_user.id != settings.admin_id)
+async def handle_withdraw_request(message: Message):
+    """Foydalanuvchining arizasini qabul qilish"""
+    text = message.text.strip()
+    
+    # Agar ariza formatida bo'lsa (miqdor, username yoki ID bor)
+    # Lekin tugma matnlari bo'lmasin
+    button_texts = ["⭐ Balans", "👥 Referallar", "🔗 Referal havola", "⭐ Stars yechib olish", "📞 Admin bilan aloqa"]
+    
+    if text not in button_texts and (any(keyword in text.lower() for keyword in ['miqdor:', 'username:', 'id:']) or '💰' in text or any(char.isdigit() for char in text)):
+        print(f"DEBUG: Ariza formati topildi: {text}")
+        async with async_session_maker() as session:
+            result = await session.execute(select(User).where(User.telegram_id == message.from_user.id))
+            user = result.scalar_one_or_none()
+            
+            if user:
+                print(f"DEBUG: Foydalanuvchi topildi: {user.first_name}, balance: {user.balance}")
+                # Miqdorni ajratib olish
+                amount = user.balance  # Default - butun balans
+                for line in text.split('\n'):
+                    if 'miqdor:' in line.lower() or '💰' in line:
+                        try:
+                            # Raqamlarni ajratib olish
+                            numbers = re.findall(r'\d+', line)
+                            if numbers:
+                                amount = int(numbers[0])
+                                print(f"DEBUG: Miqdor topildi: {amount}")
+                                break
+                        except:
+                            pass
+                
+                if amount < settings.minimum_withdrawal:
+                    await message.answer(
+                        f"❌ Miqdor yetarli emas!\n\n"
+                        f"⭐ Minimal yechib olish: {format_balance(settings.minimum_withdrawal)} ⭐\n"
+                        f"💰 Siz kiritgan: {format_balance(amount)} ⭐"
+                    )
+                    return
+                
+                if amount > user.balance:
+                    await message.answer(
+                        f"❌ Balansingiz yetarli emas!\n\n"
+                        f"💰 Sizning balansingiz: {format_balance(user.balance)} ⭐\n"
+                        f"💰 Siz kiritgan: {format_balance(amount)} ⭐"
+                    )
+                    return
+                
+                print(f"DEBUG: Arizani yaratishga tayyor: amount={amount}")
+                # Arizani yaratish
+                withdrawal = Withdrawal(
+                    user_id=user.telegram_id,
+                    amount=amount,
+                    user_info=text,  # Bu yerda foydalanuvchi ma'lumotlari saqlanadi
+                    status="pending"
+                )
+                session.add(withdrawal)
+                await session.commit()
+                print(f"DEBUG: Ariza bazaga saqlandi: {withdrawal.id}")
+                
+                # Adminga xabar yuborish
+                try:
+                    keyboard = InlineKeyboardMarkup(inline_keyboard=[
+                        [
+                            InlineKeyboardButton(text="✅ Tasdiqlash", callback_data=f"withdraw_action_{withdrawal.id}_approve"),
+                            InlineKeyboardButton(text="❌ Rad etish", callback_data=f"withdraw_action_{withdrawal.id}_reject")
+                        ]
+                    ])
+                    
+                    await message.bot.send_message(
+                        settings.admin_id,
+                        f"🆕 YANGI ARIZA!\n\n"
+                        f"👤 Foydalanuvchi: {user.first_name}\n"
+                        f"🆔 ID: {user.telegram_id}\n"
+                        f"💰 Miqdor: {format_balance(amount)} ⭐\n"
+                        f"📝 Ariza matni: {text}\n"
+                        f"📅 Sana: {datetime.now().strftime('%d.%m.%Y %H:%M')}\n\n"
+                        f"⚠️ Arizani tekshirib, tasdiqlang yoki rad eting!",
+                        reply_markup=keyboard
+                    )
+                    print(f"✅ Ariza adminga yuborildi: {user.first_name}")
+                except Exception as e:
+                    print(f"❌ Adminga yuborishda xatolik: {e}")
+                
+                # Foydalanuvchiga javob
+                await message.answer(
+                    f"✅ Arizangiz qabul qilindi!\n\n"
+                    f"💰 Miqdor: {format_balance(amount)} ⭐\n"
+                    f"📝 Arizangiz adminga yuborildi\n\n"
+                    f"⏳ Admin tekshirib, tasdiqlaydi (1-24 soat)\n"
+                )
+                
+                # Balansni kamaytirish
+                user.balance -= amount
+                await session.commit()
+                print(f"DEBUG: Balans kamaytirildi: {user.balance}")
+            else:
+                print(f"DEBUG: Foydalanuvchi topilmadi: {message.from_user.id}")
+                await message.answer("❌ Sizning ma'lumotlaringiz topilmadi!")
+    else:
+        print(f"DEBUG: Ariza formati emas: {text}")
+        await message.answer(
+            "❌ Ariza formati noto'g'ri!\n\n"
+            "📝 To'g'ri format:\n"
+            "💰 Miqdor: 30\n"
+            "👤 Foydalanuvchi nomi: @username\n"
+            "🆔 Telegram ID: 123456789\n\n"
+            "⚠️ Iltimos, qayta urinib ko'ring!"
+        )
+
+@dp.message(F.text == "📞 Admin bilan aloqa")
+async def cmd_contact_admin(message: Message):
+    print(f"DEBUG: Admin contact button pressed by user {message.from_user.id}")
+    
+    if not await check_subscription(message.from_user.id, message.bot):
+        await message.answer(
+            "🔒 Botdan to'liq foydalanish uchun homiy kanallarimizga obuna bo'ling!\n\n"
+            "📺 Obuna bo'lgandan so'ng barcha funktsiyalar mavjud bo'ladi.",
+            reply_markup=restricted_menu()
+        )
+        return
+    
+    # Admin bilan muloqot xabari
+    await message.answer(
+        "📞 Admin bilan bog'lanish:\n\n"
+        f"👤 Admin: @{settings.admin_username}\n"
+        f"🆔 Admin ID: {settings.admin_id}\n\n"
+        "📝 Savollaringiz bo'lsa yozing!\n\n"
+        "⏰ Admin tez orada javob beradi"
+    )
+    
+    # Adminga xabar yuborish
+    try:
+        await message.bot.send_message(
+            settings.admin_id,
+            f"📞 FOYDALANUVCHI MULOQOT SO'RADI!\n\n"
+            f"👤 Ism: {message.from_user.first_name}\n"
+            f"🆔 ID: {message.from_user.id}\n"
+            f"👤 Username: @{message.from_user.username or 'none'}\n\n"
+            f"📞 Admin bilan bog'lanish tugmasini bosdi!"
+        )
+        print(f"DEBUG: Admin notification sent for user {message.from_user.id}")
+    except Exception as e:
+        print(f"ERROR: Failed to send admin notification: {e}")
 
 # Admin handlers
+@dp.callback_query(F.data.startswith("withdraw_action_"))
+async def admin_withdraw_action(callback: CallbackQuery):
+    """Admin arizani tasdiqlaydi yoki rad etdi"""
+    print(f"DEBUG: Callback received: {callback.data}")
+    print(f"DEBUG: Admin ID: {callback.from_user.id}, Required: {settings.admin_id}")
+    
+    if callback.from_user.id != settings.admin_id:
+        print(f"DEBUG: Admin check failed - not admin")
+        await callback.answer("❌ Siz admin emassiz!")
+        return
+    
+    print(f"DEBUG: Admin check passed")
+    
+    # Callback formatini tekshirish: withdraw_action_1_approve
+    if not callback.data.startswith("withdraw_action_"):
+        log_error(f"Invalid callback prefix: {callback.data}")
+        await callback.answer("❌ Noto'g'ri callback format!")
+        return
+    
+    # Ma'lumotlarni ajratish
+    parts = callback.data.split("_")
+    if len(parts) != 3:
+        log_error(f"Invalid callback format: {callback.data}, parts: {parts}")
+        await callback.answer("❌ Noto'g'ri callback format!")
+        return
+    
+    action = parts[2]  # approve yoki reject
+    withdrawal_id_str = parts[1]
+    
+    # ID ni tekshirish - faqat raqam va minimal 2 xonali
+    if not withdrawal_id_str.isdigit():
+        log_error(f"Invalid withdrawal ID: {withdrawal_id_str}")
+        await callback.answer("❌ Noto'g'ri callback format! ID kamida 2 ta raqamdan iborat bo'lishi kerak.")
+        return
+    
+    withdrawal_id = int(withdrawal_id_str)
+    log_info(f"Action={action}, Withdrawal ID={withdrawal_id}")
+    
+    # Callback answer qilish
+    await callback.answer("✅ Ariza boshqarildi!")
+    log_info(f"Action completed: {action}")
+    
+    async with async_session_maker() as session:
+        result = await session.execute(
+            select(Withdrawal).where(Withdrawal.id == withdrawal_id)
+        )
+        withdrawal = result.scalar_one_or_none()
+        
+        if not withdrawal:
+            print(f"DEBUG: Withdrawal not found: {withdrawal_id}")
+            await callback.answer("❌ Ariza topilmadi!")
+            return
+        
+        print(f"DEBUG: Withdrawal found: {withdrawal.id}, status={withdrawal.status}")
+        
+        # Foydalanuvchini topish
+        user_result = await session.execute(
+            select(User).where(User.telegram_id == withdrawal.user_id)
+        )
+        user = user_result.scalar_one_or_none()
+        
+        if not user:
+            print(f"DEBUG: User not found: {withdrawal.user_id}")
+            await callback.answer("❌ Foydalanuvchi topilmadi!")
+            return
+        
+        print(f"DEBUG: User found: {user.first_name}")
+        
+        if action == "approve":
+            withdrawal.status = "approved"
+            await session.commit()
+            print(f"DEBUG: Withdrawal approved, status updated to {withdrawal.status}")
+            
+            # Foydalanuvchiga xabar
+            try:
+                await callback.bot.send_message(
+                    withdrawal.user_id,
+                    f"🎉 ARIZANGIZ TASDIQLANDI!\n\n"
+                    f"💰 Miqdor: {format_balance(withdrawal.amount)} ⭐\n"
+                    f"📝 Ma'lumotlar: {withdrawal.user_info}\n\n"
+                    f"✅ Admin tomonidan tasdiqlandi!\n"
+                    f"🚀 Pul yuborilmoqda...\n\n"
+                    f"📞 Savollar: @{settings.admin_username}"
+                )
+                print(f"DEBUG: User notification sent")
+            except Exception as e:
+                print(f"Error sending user notification: {e}")
+            
+            await callback.message.edit_text(
+                f"✅ ARIZA TASDIQLANDI!\n\n"
+                f"👤 Foydalanuvchi: {user.first_name}\n"
+                f"💰 Miqdor: {format_balance(withdrawal.amount)} ⭐\n"
+                f"📝 Ma'lumotlar: {withdrawal.user_info}\n\n"
+                f"🎉 Pul yuborildi!"
+            )
+            print(f"DEBUG: Admin message updated")
+            
+        elif action == "reject":
+            withdrawal.status = "rejected"
+            print(f"DEBUG: Withdrawal rejected, status updated to {withdrawal.status}")
+            
+            # Pulni qaytarib berish
+            user.balance += withdrawal.amount
+            await session.commit()
+            print(f"DEBUG: Balance restored: {user.balance}")
+            
+            # Foydalanuvchiga xabar
+            try:
+                await callback.bot.send_message(
+                    withdrawal.user_id,
+                    f"❌ ARIZANGIZ RAD ETILDI!\n\n"
+                    f"💰 Miqdor: {format_balance(withdrawal.amount)} ⭐\n"
+                    f"📝 Ma'lumotlar: {withdrawal.user_info}\n\n"
+                    f"❌ Admin tomonidan rad etildi\n"
+                    f"💸 Pul balansingizga qaytarildi\n"
+                    f"📊 Yangi balans: {format_balance(user.balance)} ⭐\n\n"
+                    f"📞 Savollar: @{settings.admin_username}"
+                )
+                print(f"DEBUG: User rejection notification sent")
+            except Exception as e:
+                print(f"Error sending user rejection notification: {e}")
+            
+            await callback.message.edit_text(
+                f"❌ ARIZA RAD ETILDI!\n\n"
+                f"👤 Foydalanuvchi: {user.first_name}\n"
+                f"💰 Miqdor: {format_balance(withdrawal.amount)} ⭐\n"
+                f"📝 Ma'lumotlar: {withdrawal.user_info}\n\n"
+                f"💸 Pul balansga qaytarildi"
+            )
+            print(f"DEBUG: Admin rejection message updated")
+        
+        await callback.answer("✅ Ariza boshqarildi!")
+        print(f"DEBUG: Action completed: {action}")
+
 @dp.message(F.text == "👥 Foydalanuvchilar")
 async def admin_users_list(message: Message):
     if message.from_user.id != settings.admin_id:
@@ -495,19 +1029,35 @@ async def admin_users_list(message: Message):
         return
 
     async with async_session_maker() as session:
+        # Umumiy statistika
+        user_count_result = await session.execute(select(func.count(User.id)))
+        total_users = user_count_result.scalar()
+        
+        balance_result = await session.execute(select(func.sum(User.balance)))
+        total_balance = balance_result.scalar() or 0
+        
+        # Oxirgi foydalanuvchilar
         result = await session.execute(
             select(User).order_by(User.created_at.desc()).limit(10)
         )
         users = result.scalars().all()
 
-        text = "👥 Oxirgi foydalanuvchilar:\n\n"
+        # Umumiy statistika xabari
+        stats_text = f"📊 **UMUMIY STATISTIKA**\n\n"
+        stats_text += f"👥 Jami foydalanuvchilar: {total_users} ta\n"
+        stats_text += f"⭐ Jami balans: {format_balance(total_balance)} ⭐\n"
+        stats_text += f"📊 O'rtacha balans: {format_balance(total_balance // total_users if total_users > 0 else 0)} ⭐\n\n"
+        
+        # Oxirgi foydalanuvchilar
+        stats_text += "👥 **OXIRGI FOYDALANUVCHILAR**\n\n"
         
         for user in users:
-            text += f"👤 {user.first_name} (@{user.username or 'none'})\n"
-            text += f"⭐ Balans: {format_balance(user.balance)} ⭐\n"
-            text += f"🆔 ID: {user.telegram_id}\n\n"
+            stats_text += f"👤 {user.first_name} (@{user.username or 'none'})\n"
+            stats_text += f"⭐ Balans: {format_balance(user.balance)} ⭐\n"
+            stats_text += f"🆔 ID: {user.telegram_id}\n"
+            stats_text += f"👥 Referallar: {user.referral_count} ta\n\n"
 
-        await message.answer(text)
+        await message.answer(stats_text)
 
 @dp.message(F.text == "⭐ Balansni o'zgartirish")
 async def admin_balance_change(message: Message):
