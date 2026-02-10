@@ -169,15 +169,18 @@ async def check_subscription(user_id: int, bot: Bot) -> bool:
         return True
     
     if settings.is_railway:
-        print("DEBUG: Railway mode enabled, returning True")
-        return True
+        print("DEBUG: Railway mode enabled, but still checking subscription")
+        # Railwayda ham obuna tekshirish kerak, lekin timeout ni oshiramiz
+        timeout = 10.0
+    else:
+        timeout = 5.0
     
     for channel in channels:
         try:
             print(f"DEBUG: Checking channel {channel} for user {user_id}")
             member = await asyncio.wait_for(
                 bot.get_chat_member(channel, user_id), 
-                timeout=5.0
+                timeout=timeout
             )
             print(f"DEBUG: User {user_id} status in {channel}: {member.status}")
             if member.status in ['left', 'kicked', 'banned']:
@@ -240,7 +243,12 @@ async def check_subscription_callback(callback: CallbackQuery):
         text += f"🔽 Obuna bo'lmagan kanallar:\n"
         for channel in unsubscribed_channels:
             text += f"• {channel}\n"
-        text += f"\n📱 Quyi tugmalarni bosib obuna bo'ling!"
+        text += f"\n📱 Quyi tugmalarni bosib obuna bo'ling!\n\n"
+        text += f"⚠️ Diqqat: Obuna bo'lmaganingiz uchun:\n"
+        text += f"• Referallaringizdan bonuslar olinmaydi\n"
+        text += f"• Stars yechib olish imkonsiz\n"
+        text += f"• Botning barcha funktsiyalari cheklangan\n\n"
+        text += f"🔄 Obuna bo'lgandan so'ng 'Obunani qayta tekshirish' tugmasini bosing!"
     else:
         text = f"🎉 TABRIKLAYMIZ!\n\n"
         text += f"✅ Siz barcha {len(channels)} ta kanalga obuna bo'ldingiz!\n"
