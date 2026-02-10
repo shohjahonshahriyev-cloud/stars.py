@@ -49,7 +49,7 @@ def log_debug(message: str):
 
 # ==================== CONFIG ====================
 class Config(BaseSettings):
-    bot_token: str = "8592783954:AAF5-jJLxbS0WvPzbU_IK-UgeowfljwN8lo"
+    bot_token: str = "8512569193:AAFF-vMCt4GSbldCSZd5JoJhJYE6M0F7_Mc"
     admin_id: int = 422057508   # Test uchun o'zgartirildi
     admin_username: str = "shohjahon_o5"
     database_url: str = os.getenv("DATABASE_URL", "sqlite+aiosqlite:///stars_bot.db").replace("postgresql://", "postgresql+asyncpg://")
