@@ -24,7 +24,7 @@ class Config(BaseSettings):
     admin_id: int = 422057508
     admin_username: str = "shohjahon_o5"
     database_url: str = "sqlite+aiosqlite:///stars_bot.db"
-    referral_reward: int = 5  # 5 stars
+    referral_reward: int = 3  # 3 stars
     minimum_withdrawal: int = 50  # 50 stars
     sponsor_channels: str = "@shohjahon_shahriyev"  # Default kanal
     is_railway: bool = False
